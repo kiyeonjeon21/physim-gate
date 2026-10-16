@@ -1,0 +1,25 @@
+# Temporary: exercises the published action the way an outside repository uses it.
+name: action-smoke
+on:
+  pull_request:
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: gate
+        uses: kiyeonjeon21/physim-gate@v0.2.0
+        with:
+          baseline: examples/lerobot-pusht/baseline
+          candidate: examples/lerobot-pusht/candidate-n-action-steps-8
+          config: examples/lerobot-pusht/gate.yaml
+          adapter: lerobot
+          adapter-options: start_seed=1000
+          comment: "true"
+          fail: "false"
+      - run: |
+          test "${{ steps.gate.outputs.verdict }}" = FAIL
+          test "${{ steps.gate.outputs.exit-code }}" = 1
