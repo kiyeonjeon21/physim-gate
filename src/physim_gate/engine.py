@@ -461,10 +461,13 @@ def _collect_samples(
         mode, note = "paired", None
     else:
         mode = "unpaired"
-        note = (
-            "trial_ids differ between runs, so trials are compared as independent samples "
-            "(set pairing: paired to match on the shared ids instead)"
-        )
+        if b_keys & c_keys:
+            note = (
+                "trial_ids differ between runs, so trials are compared as independent samples "
+                "(set pairing: paired to match on the shared ids instead)"
+            )
+        else:
+            note = "the runs share no trial_id, so trials are compared as independent samples"
 
     if mode == "unpaired":
         b_obs = [(k, v) for k, v in b_values.items() if v is not None]

@@ -233,8 +233,21 @@ def test_auto_falls_back_to_unpaired_when_ids_differ() -> None:
     ids_c = [f"c{i}" for i in range(N)]
     metric, _ = compare(ramp(10), ramp(10), base_ids=ids_b, cand_ids=ids_c)
     assert metric.pairing.mode == "unpaired"
-    assert "independent samples" in (metric.pairing.note or "")
+    assert metric.pairing.note == (
+        "the runs share no trial_id, so trials are compared as independent samples"
+    )
     assert metric.evidence.method == "unpaired_bootstrap_expanded"
+
+
+def test_auto_suggests_explicit_pairing_only_when_some_ids_are_shared() -> None:
+    ids_b = [f"t{i}" for i in range(N)]
+    ids_c = [f"t{i}" for i in range(5, N + 5)]
+    # Each run lacks 5 of the other's ids; allow that explicitly.
+    config = gate(max_absolute_degradation=1, max_missing_fraction=0.2)
+    metric, _ = compare(ramp(10), ramp(10), base_ids=ids_b, cand_ids=ids_c, config=config)
+    assert metric.pairing is not None
+    assert metric.pairing.mode == "unpaired"
+    assert "set pairing: paired to match on the shared ids" in (metric.pairing.note or "")
 
 
 def test_unpaired_samples_may_have_different_sizes() -> None:
