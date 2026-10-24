@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from physim_gate.comparison import MetricComparison
 
 
@@ -23,10 +25,26 @@ def signed(value: float | None, digits: int = 4) -> str:
     return text if value <= 0 or text.startswith("+") else f"+{text}"
 
 
-def interval(bounds: tuple[float, float] | None) -> str:
+def interval(bounds: tuple[float, float] | None, digits: int = 4) -> str:
+    """Both bounds in one notation and at one precision, so they read as a pair.
+
+    The precision follows the larger bound, to ``digits`` significant digits; trailing zeros
+    are dropped only where both bounds have them.
+    """
     if bounds is None:
         return "-"
-    return f"[{signed(bounds[0])}, {signed(bounds[1])}]"
+    low, high = bounds
+    largest = max(abs(low), abs(high))
+    if largest == 0 or largest >= 1e5 or largest < 1e-3:
+        return f"[{signed(low, digits)}, {signed(high, digits)}]"
+    decimals = max(0, digits - 1 - math.floor(math.log10(largest)))
+    texts = [f"{value:+.{decimals}f}" if value != 0 else "0" for value in (low, high)]
+    while decimals > 0 and all(t == "0" or t.endswith("0") for t in texts):
+        decimals -= 1
+        texts = [t if t == "0" else t[:-1] for t in texts]
+    if decimals == 0:
+        texts = [t.rstrip(".") for t in texts]
+    return f"[{texts[0]}, {texts[1]}]"
 
 
 def unit_suffix(metric: MetricComparison) -> str:

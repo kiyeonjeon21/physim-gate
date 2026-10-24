@@ -9,6 +9,7 @@ from rich.console import Console
 from physim_gate.comparison import ComparisonResult, comparison_from_data
 from physim_gate.engine import compare_runs
 from physim_gate.reporting import print_comparison, render_html, render_junit, render_markdown
+from physim_gate.reporting.format import interval
 from physim_gate.reporting.markdown import MARKER
 from physim_gate.schema import SchemaError
 from tests.conftest import make_config, make_run
@@ -228,3 +229,29 @@ def test_terminal_output_is_never_truncated() -> None:
         console = Console(width=width, record=True, color_system=None)
         print_comparison(comparison, console)
         assert "…" not in console.export_text(), width
+
+
+@pytest.mark.parametrize(
+    ("bounds", "text"),
+    [
+        # One notation and one precision for both bounds, set by the larger one.
+        ((0.000473, 0.02172), "[+0.00047, +0.02172]"),
+        ((-0.009847, 0.03462), "[-0.00985, +0.03462]"),
+        ((-0.01534, 0.0237), "[-0.01534, +0.02370]"),
+        ((-1.5, 2.25), "[-1.50, +2.25]"),
+        ((10.04, 12.0), "[+10.04, +12.00]"),
+        # Trailing zeros go only where both bounds have them.
+        ((2.0, 2.0), "[+2, +2]"),
+        ((-0.5, 0.5), "[-0.5, +0.5]"),
+        ((0.0, 0.0123), "[0, +0.0123]"),
+        ((0.0, 0.0), "[0, 0]"),
+        # Very small or very large intervals stay in scientific notation.
+        ((1e-5, 2e-5), "[+1.000e-05, +2.000e-05]"),
+        ((123456.0, 234567.0), "[+1.235e+05, +2.346e+05]"),
+        (None, "-"),
+    ],
+)
+def test_interval_bounds_share_notation_and_precision(
+    bounds: tuple[float, float] | None, text: str
+) -> None:
+    assert interval(bounds) == text
