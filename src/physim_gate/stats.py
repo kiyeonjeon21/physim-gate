@@ -184,7 +184,11 @@ def _t_quantile(probability: float, df: float) -> float:
         beta = _regularized_beta(df / (df + x * x), df / 2, 0.5)
         return 1 - beta / 2 if x >= 0 else beta / 2
 
-    low, high = 0.0, 1000.0
+    low, high = 0.0, 1.0
+    while cdf(high) < probability:
+        # Few degrees of freedom and a strict level (Bonferroni) put the quantile far out:
+        # t[0.99999, 1] is about 31831.
+        low, high = high, high * 2
     for _ in range(200):
         mid = (low + high) / 2
         if cdf(mid) < probability:
@@ -222,6 +226,51 @@ def _regularized_beta(x: float, a: float, b: float) -> float:
         if abs(c * d - 1.0) < 1e-15:
             break
     return math.exp(log_front) * result / a
+
+
+@dataclass(frozen=True)
+class TInterval:
+    """A t interval of ``mean(candidate) - mean(baseline)``, with its standard error and df."""
+
+    low: float
+    high: float
+    standard_error: float
+    df: float
+
+
+def t_interval_difference(
+    baseline: Sequence[float],
+    candidate: Sequence[float],
+    *,
+    paired: bool,
+    confidence: float,
+) -> TInterval:
+    """Student t interval of the difference in means: paired t, or Welch's t when unpaired.
+
+    The engine uses it over cluster means (one value per training seed, say), where the
+    number of values is small and a bootstrap would be unreliable.
+    """
+    if paired:
+        if len(baseline) != len(candidate):
+            raise ValueError("paired samples must have equal length")
+        n = len(baseline)
+        if n < 2:
+            raise ValueError("a paired t interval needs at least 2 pairs")
+        differences = [c - b for b, c in zip(baseline, candidate, strict=True)]
+        center = mean(differences)
+        se = statistics.stdev(differences) / math.sqrt(n)
+        df: float = n - 1
+    else:
+        nb, nc = len(baseline), len(candidate)
+        if nb < 2 or nc < 2:
+            raise ValueError("a Welch t interval needs at least 2 values per sample")
+        vb = statistics.variance(baseline) / nb
+        vc = statistics.variance(candidate) / nc
+        center = mean(candidate) - mean(baseline)
+        se = math.sqrt(vb + vc)
+        df = (vb + vc) ** 2 / (vb**2 / (nb - 1) + vc**2 / (nc - 1)) if se > 0 else nb + nc - 2
+    half = _t_quantile(1 - (1 - confidence) / 2, df) * se
+    return TInterval(low=center - half, high=center + half, standard_error=se, df=df)
 
 
 def is_binary(values: Sequence[float]) -> bool:

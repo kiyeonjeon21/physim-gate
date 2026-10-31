@@ -17,6 +17,7 @@ from physim_gate.stats import (
     _t_quantile,
     bootstrap_degradation,
     newcombe_counts,
+    t_interval_difference,
 )
 
 np = pytest.importorskip("numpy")
@@ -71,6 +72,18 @@ def test_expanded_percentile_levels_match_scipy_t_quantiles() -> None:
     for n, df in ((10, 9), (10, 18), (30, 29), (200, 398)):
         expected = 2 * scipy_stats.norm.cdf(-np.sqrt(n / (n - 1)) * scipy_stats.t.ppf(0.975, df))
         assert _expanded_alpha(0.05, n / (n - 1), df) == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.parametrize(("nb", "nc"), [(3, 3), (5, 3), (10, 4)])
+def test_cluster_t_intervals_match_scipy(nb: int, nc: int) -> None:
+    baseline, candidate = _samples(nb * 10 + nc, nb, nc)
+    welch = scipy_stats.ttest_ind(candidate, baseline, equal_var=False).confidence_interval(0.95)
+    ours = t_interval_difference(baseline, candidate, paired=False, confidence=0.95)
+    assert (ours.low, ours.high) == pytest.approx((welch.low, welch.high), rel=1e-9)
+    if nb == nc:
+        paired = scipy_stats.ttest_rel(candidate, baseline).confidence_interval(0.9)
+        ours = t_interval_difference(baseline, candidate, paired=True, confidence=0.9)
+        assert (ours.low, ours.high) == pytest.approx((paired.low, paired.high), rel=1e-9)
 
 
 def test_unpaired_newcombe_matches_statsmodels() -> None:
