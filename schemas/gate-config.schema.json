@@ -62,6 +62,25 @@
         "bootstrap_method": {
           "$ref": "#/$defs/BootstrapMethod",
           "default": "expanded_percentile"
+        },
+        "cluster_by": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cluster By"
+        },
+        "min_clusters": {
+          "default": 3,
+          "minimum": 2,
+          "title": "Min Clusters",
+          "type": "integer"
         }
       },
       "title": "Defaults",
@@ -183,6 +202,32 @@
           ],
           "default": null,
           "title": "Max Missing Fraction"
+        },
+        "cluster_by": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cluster By"
+        },
+        "min_clusters": {
+          "anyOf": [
+            {
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Clusters"
         }
       },
       "title": "MetricGate",

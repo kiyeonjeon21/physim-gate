@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import sys
+import textwrap
 import traceback
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
@@ -27,6 +29,7 @@ from physim_gate.adapters.base import (
     load_with_adapter,
     parse_options,
 )
+from physim_gate.combine import RUN_LABEL, cluster_names, combine_runs
 from physim_gate.comparison import (
     ComparisonResult,
     ExitCode,
@@ -46,6 +49,7 @@ from physim_gate.planning import (
     plan_from_comparison,
 )
 from physim_gate.provenance import sha256_path
+from physim_gate.reporting.format import count
 from physim_gate.reporting.html import render_html
 from physim_gate.reporting.junit import render_junit
 from physim_gate.reporting.markdown import render_markdown
@@ -191,36 +195,73 @@ StoreOpt = Annotated[
 
 
 def _run_comparison(
-    baseline: Path,
-    candidate: Path,
+    baseline: Sequence[Path],
+    candidate: Sequence[Path],
     config: Path,
     adapter: str,
     options: dict[str, str],
     store: Path | None,
 ) -> ComparisonResult:
-    """Load both runs (the baseline possibly from the store) and compare them."""
+    """Load both runs (the baseline possibly from the store) and compare them.
+
+    A side given as several files is combined into one run whose trials are labeled with
+    :data:`RUN_LABEL`, and every metric without ``cluster_by`` is then clustered by it.
+    """
     gate = load_config(config)
-    cand_run = _load(adapter, candidate, options)
-    if is_reference(str(baseline)):
-        baseline_file, base_run = load_baseline(
-            cand_run.scenario.id, reference_name(str(baseline)), store
+    cand_files = list(candidate)
+    cand_run = _load_side("candidate", adapter, cand_files, options)
+    if len(baseline) == 1 and is_reference(str(baseline[0])):
+        if len(cand_files) > 1:
+            raise InputError(
+                f"--baseline {baseline[0]} uses the store, which holds one run per baseline; "
+                "give the baseline runs as files to compare several runs"
+            )
+        base_file, base_run = load_baseline(
+            cand_run.scenario.id, reference_name(str(baseline[0])), store
         )
+        base_files = [base_file]
     else:
-        baseline_file = baseline
-        base_run = _load(adapter, baseline, options)
-    if baseline_file.resolve() == candidate.resolve():
-        raise InputError(
-            f"baseline and candidate are the same file ({candidate}); a comparison of a run "
-            "with itself always passes"
-        )
-    baseline_ref = InputRef(path=str(baseline_file), sha256=sha256_path(baseline_file))
+        base_files = list(baseline)
+        base_run = _load_side("baseline", adapter, base_files, options)
+    for path in base_files:
+        if any(path.resolve() == c.resolve() for c in cand_files):
+            raise InputError(
+                f"baseline and candidate are the same file ({path}); a comparison of a run "
+                "with itself always passes"
+            )
+    if len(base_files) > 1 or len(cand_files) > 1:
+        gate = gate.with_default_cluster_by(RUN_LABEL)
     inputs = Inputs(
-        baseline=baseline_ref,
-        candidate=InputRef(path=str(candidate), sha256=sha256_path(candidate)),
+        baseline=_input_ref(base_files),
+        candidate=_input_ref(cand_files),
         config=InputRef(path=str(config), sha256=sha256_path(config)),
         adapter=adapter,
+        baseline_runs=_part_refs(base_files),
+        candidate_runs=_part_refs(cand_files),
     )
     return compare_runs(base_run, cand_run, gate, inputs=inputs)
+
+
+def _load_side(
+    side: str, adapter_name: str, paths: Sequence[Path], options: dict[str, str]
+) -> RunResult:
+    runs = [_load(adapter_name, path, options) for path in paths]
+    if len(runs) == 1:
+        return runs[0]
+    return combine_runs(side, cluster_names(paths, runs), runs)
+
+
+def _input_ref(paths: Sequence[Path]) -> InputRef:
+    if len(paths) == 1:
+        return InputRef(path=str(paths[0]), sha256=sha256_path(paths[0]))
+    digests = "\n".join(sha256_path(path) for path in paths)
+    return InputRef(sha256=hashlib.sha256(digests.encode()).hexdigest())
+
+
+def _part_refs(paths: Sequence[Path]) -> list[InputRef]:
+    if len(paths) == 1:
+        return []
+    return [InputRef(path=str(path), sha256=sha256_path(path)) for path in paths]
 
 
 def _load(adapter_name: str, path: Path, options: dict[str, str]) -> RunResult:
@@ -239,8 +280,14 @@ def _write(path: Path, text: str) -> None:
 
 @app.command(epilog=EXIT_CODES_HELP)
 def compare(
-    baseline: Annotated[Path, typer.Option("--baseline", "-b", help="Baseline run result.")],
-    candidate: Annotated[Path, typer.Option("--candidate", "-c", help="Candidate run result.")],
+    baseline: Annotated[
+        list[Path],
+        typer.Option("--baseline", "-b", help="Baseline run result. Repeat it for several runs."),
+    ],
+    candidate: Annotated[
+        list[Path],
+        typer.Option("--candidate", "-c", help="Candidate run result. Repeat it for several runs."),
+    ],
     config: Annotated[Path, typer.Option("--config", "-g", help="Gate config (gate.yaml).")],
     output: Annotated[
         Path | None, typer.Option("--output", "-o", help="Write the comparison result JSON here.")
@@ -260,6 +307,10 @@ def compare(
 
     --baseline @NAME uses the stored baseline NAME of the candidate's scenario
     (see 'physim-gate baseline').
+
+    Several --baseline or --candidate runs (one per training seed, say) are compared run by
+    run: each run is a cluster, and the interval comes from the spread of the run means
+    (cluster_by: physim.run, unless the gate config sets cluster_by).
     """
     with _guard():
         options = parse_options(adapter_option or [])
@@ -521,13 +572,14 @@ def _print_plan(plan: Plan, rate: float | None, direction: Direction) -> None:
     for label, value in rows:
         out.print(Text(f"  {label:<18}", style="dim") + Text(value))
     out.print()
+    per = "trials per run" if plan.unit == "trials" else f"{plan.unit} per side"
     if plan.trials is None:
         out.print(
-            Text(f"  more than {plan.max_trials:,} trials per run", style="bold yellow")
+            Text(f"  more than {plan.max_trials:,} {per}", style="bold yellow")
             + Text(" - widen the margin or accept INCONCLUSIVE verdicts", style="dim")
         )
     else:
-        out.print(Text(f"  {plan.trials:,} trials per run", style="bold"))
+        out.print(Text(f"  {plan.trials:,} {per}", style="bold"))
     if plan.probabilities is not None:
         p = plan.probabilities
         line = Text("  verdicts at that size: ", style="dim")
@@ -566,7 +618,9 @@ def _print_pilot_plans(source: Path, comparison: ComparisonResult, plans: list[M
         soft_wrap=True,
     )
     table = Table(show_edge=False, pad_edge=False, header_style="bold")
-    for column in ("metric", "pilot n", "degradation", "margin", "goal", "trials per run"):
+    clustered = any(item.plan is not None and item.plan.unit != "trials" for item in plans)
+    needed = "trials or runs per side" if clustered else "trials per run"
+    for column in ("metric", "pilot n", "degradation", "margin", "goal", needed):
         table.add_column(column, justify="left" if column in ("metric", "goal") else "right")
     table.add_column("P(goal)", justify="right")
     notes: list[str] = []
@@ -578,33 +632,33 @@ def _print_pilot_plans(source: Path, comparison: ComparisonResult, plans: list[M
             notes.append(f"{item.metric}: {item.reason}")
             continue
         plan = item.plan
-        count = "-"
         if metric.pairing is not None and metric.pairing.mode == "paired":
-            count = f"{metric.pairing.n_pairs} pairs"
-        elif metric.baseline is not None and metric.candidate is not None:
-            count = f"{metric.baseline.n}/{metric.candidate.n}"
+            pilot = f"{metric.pairing.n_pairs} pairs"
+        else:
+            pilot = count(metric)
+        if plan.trials is not None:
+            size = f"{plan.trials:,}" + ("" if plan.unit == "trials" else f" {plan.unit}")
+        else:
+            size = f">{plan.max_trials:,}"
         goal_verdict = Verdict.PASS if plan.goal.value == "pass" else Verdict.FAIL
         table.add_row(
             item.metric,
-            count,
+            pilot,
             f"{plan.true_degradation:+.4g}",
             f"{plan.margin:.4g}",
             Text(goal_verdict.value, style=VERDICT_STYLE[goal_verdict]),
-            Text(
-                f"{plan.trials:,}" if plan.trials is not None else f">{plan.max_trials:,}",
-                style="bold",
-            ),
+            Text(size, style="bold"),
             _percent(plan.probabilities.of(plan.goal)) if plan.probabilities else "-",
         )
         notes.append(f"{item.metric}: {'; '.join([plan.method, *plan.notes])}")
     out.print(table)
-    out.print(
-        Text(
-            "degradation = assumed true degradation (the pilot's observed value unless "
-            "--true-degradation is given); goal = the verdict that degradation should get",
-            style="dim",
-        )
+    legend = (
+        "degradation = assumed true degradation (the pilot's observed value unless "
+        "--true-degradation is given); goal = the verdict that degradation should get"
     )
+    # Wrap here: rich would leave a trailing space at each break.
+    for line in textwrap.wrap(legend, out.width):
+        out.print(Text(line, style="dim"), soft_wrap=True)
     if notes:
         out.print()
         for note in notes:
@@ -845,8 +899,8 @@ def suite(
 
         def compare_scenario(scenario: ResolvedScenario) -> ComparisonResult:
             return _run_comparison(
-                scenario.baseline,
-                scenario.candidate,
+                [scenario.baseline],
+                [scenario.candidate],
                 scenario.config,
                 scenario.adapter,
                 scenario.adapter_options,

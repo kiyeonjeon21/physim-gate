@@ -8,6 +8,88 @@
       "title": "BootstrapMethod",
       "type": "string"
     },
+    "ClusterInfo": {
+      "additionalProperties": false,
+      "description": "How trials were grouped into clusters (``cluster_by``) and each cluster's mean.\n\nWith clusters the unit of comparison is the cluster, not the trial: the interval comes from\nthe spread of the cluster means, so variation between clusters (training seeds, say) is\ncounted. ``mode`` says whether clusters were matched by their label value.",
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "paired",
+            "unpaired"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "baseline_means": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Baseline Means",
+          "type": "object"
+        },
+        "candidate_means": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Candidate Means",
+          "type": "object"
+        },
+        "baseline_trials": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Baseline Trials",
+          "type": "object"
+        },
+        "candidate_trials": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Candidate Trials",
+          "type": "object"
+        },
+        "unmatched_baseline": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unmatched Baseline",
+          "type": "array"
+        },
+        "unmatched_candidate": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unmatched Candidate",
+          "type": "array"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "label",
+        "mode",
+        "baseline_means",
+        "candidate_means",
+        "baseline_trials",
+        "candidate_trials"
+      ],
+      "title": "ClusterInfo",
+      "type": "object"
+    },
     "Correction": {
       "enum": [
         "none",
@@ -62,6 +144,25 @@
         "bootstrap_method": {
           "$ref": "#/$defs/BootstrapMethod",
           "default": "expanded_percentile"
+        },
+        "cluster_by": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cluster By"
+        },
+        "min_clusters": {
+          "default": 3,
+          "minimum": 2,
+          "title": "Min Clusters",
+          "type": "integer"
         }
       },
       "title": "Defaults",
@@ -239,6 +340,7 @@
     },
     "Inputs": {
       "additionalProperties": false,
+      "description": "The files compared. A side read from several files lists them in ``*_runs``; its\n``sha256`` then digests the files' digests in order.",
       "properties": {
         "baseline": {
           "$ref": "#/$defs/InputRef"
@@ -260,6 +362,20 @@
           ],
           "default": null,
           "title": "Adapter"
+        },
+        "baseline_runs": {
+          "items": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "title": "Baseline Runs",
+          "type": "array"
+        },
+        "candidate_runs": {
+          "items": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "title": "Candidate Runs",
+          "type": "array"
         }
       },
       "title": "Inputs",
@@ -311,6 +427,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/PairingInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "clusters": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClusterInfo"
             },
             {
               "type": "null"
@@ -490,6 +617,32 @@
           ],
           "default": null,
           "title": "Max Missing Fraction"
+        },
+        "cluster_by": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cluster By"
+        },
+        "min_clusters": {
+          "anyOf": [
+            {
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Clusters"
         }
       },
       "title": "MetricGate",
@@ -1091,7 +1244,7 @@
       "type": "string"
     },
     "schema_version": {
-      "default": "1.0",
+      "default": "1.1",
       "title": "Schema Version",
       "type": "string"
     },

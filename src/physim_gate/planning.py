@@ -27,10 +27,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from physim_gate.combine import RUN_LABEL
 from physim_gate.comparison import ComparisonResult, MetricComparison
 from physim_gate.config import Statistic
 from physim_gate.schema import Direction
-from physim_gate.stats import is_binary, newcombe_counts, newcombe_paired_counts
+from physim_gate.stats import _t_quantile, is_binary, newcombe_counts, newcombe_paired_counts
 
 #: Simulated comparisons per candidate size for paired 0/1 metrics.
 PAIRED_SIMULATIONS = 4000
@@ -69,6 +70,8 @@ class Plan:
     #: Verdict probabilities at ``trials``: exact for 0/1 metrics, approximate otherwise.
     probabilities: VerdictProbabilities | None
     notes: list[str] = field(default_factory=list)
+    #: What ``trials`` counts: "trials", or "runs" / "clusters" for clustered comparisons.
+    unit: str = "trials"
 
 
 class PlanningError(ValueError):
@@ -317,6 +320,59 @@ def plan_continuous(
     )
 
 
+def plan_clusters(
+    stdev: float,
+    margin: float,
+    *,
+    paired: bool = False,
+    true_degradation: float = 0.0,
+    confidence: float = 0.95,
+    power: float = 0.8,
+    min_clusters: int = 3,
+    max_clusters: int = 10_000,
+    unit: str = "clusters",
+) -> Plan:
+    """Clusters (runs, training seeds) per side for a clustered comparison.
+
+    ``stdev`` is the standard deviation of cluster means (unpaired) or of the per-cluster
+    differences (``paired=True``). The engine's t interval has ``k - 1`` degrees of freedom
+    for ``k`` matched clusters and about ``2k - 2`` for two sides of ``k``, so the critical
+    value is a t quantile; the spread of the estimate is treated as normal.
+    """
+    _check_levels(confidence, power)
+    if not stdev > 0:
+        raise PlanningError("stdev must be > 0")
+    goal = _goal(margin, true_degradation)
+    sd_diff = stdev if paired else stdev * math.sqrt(2)
+    normal = statistics.NormalDist()
+
+    def probabilities(k: int) -> VerdictProbabilities:
+        se = sd_diff / math.sqrt(k)
+        critical = _t_quantile(1 - (1 - confidence) / 2, k - 1 if paired else 2 * k - 2)
+        p_pass = normal.cdf((margin - true_degradation) / se - critical)
+        p_fail = normal.cdf((true_degradation - margin) / se - critical)
+        return VerdictProbabilities(
+            pass_=p_pass, fail=p_fail, inconclusive=max(0.0, 1.0 - p_pass - p_fail)
+        )
+
+    start = max(min_clusters, 2)
+    clusters = _smallest_n(lambda k: probabilities(k).of(goal), power, start, max_clusters)
+    return Plan(
+        kind="clusters",
+        method=f"t approximation over cluster means ({'paired' if paired else 'unpaired'})",
+        goal=goal,
+        margin=margin,
+        true_degradation=true_degradation,
+        confidence=confidence,
+        power=power,
+        trials=clusters,
+        max_trials=max_clusters,
+        probabilities=probabilities(clusters) if clusters is not None else None,
+        notes=[f"counts {unit} per side; the trials within each only shrink its spread"],
+        unit=unit,
+    )
+
+
 @dataclass(frozen=True)
 class PairCells:
     """Probabilities of the four outcomes of a pair, counting the *bad* event (degradation up).
@@ -512,6 +568,8 @@ def _plan_metric(
     if n is None or base is None or cand is None or metric.direction is None:
         raise PlanningError(f"{metric.verdict.value}: the pilot has no usable values")
     degradation = n.degradation if true_degradation is None else true_degradation
+    if metric.clusters is not None:
+        return _plan_clustered(result, metric, degradation, power, max_trials)
     # A pilot with fewer than min_samples observations has no interval, so its evidence records
     # neither the method nor the confidence. Derive both the way the engine would have.
     confidence = metric.evidence.adjusted_confidence or result.config.adjusted_confidence(
@@ -592,3 +650,47 @@ def _plan_metric(
     if metric.statistic is Statistic.MEDIAN:
         plan.notes.append("the plan assumes the mean; medians usually need more trials")
     return plan
+
+
+def _plan_clustered(
+    result: ComparisonResult,
+    metric: MetricComparison,
+    degradation: float,
+    power: float,
+    max_clusters: int,
+) -> Plan:
+    clusters, n = metric.clusters, metric.numerical
+    assert clusters is not None
+    assert n is not None
+    b_means = list(clusters.baseline_means.values())
+    c_means = list(clusters.candidate_means.values())
+    paired = clusters.mode == "paired"
+    if paired:
+        differences = [c - b for b, c in zip(b_means, c_means, strict=True)]
+        spread = statistics.stdev(differences) if len(differences) > 1 else 0.0
+    elif len(b_means) > 1 and len(c_means) > 1:
+        spread = math.sqrt((statistics.variance(b_means) + statistics.variance(c_means)) / 2)
+    else:
+        raise PlanningError(
+            "the pilot needs at least 2 clusters per side to estimate the spread between them"
+        )
+    if spread == 0:
+        raise PlanningError(
+            "the pilot's cluster means do not vary, so their spread cannot be estimated"
+        )
+    confidence = metric.evidence.adjusted_confidence or result.config.adjusted_confidence(
+        metric.name
+    )
+    gate = result.config.resolve(metric.name)
+    unit = "runs" if clusters.label == RUN_LABEL else "clusters"
+    return plan_clusters(
+        spread,
+        n.margin,
+        paired=paired,
+        true_degradation=degradation,
+        confidence=confidence,
+        power=power,
+        min_clusters=gate.min_clusters,
+        max_clusters=max_clusters,
+        unit=unit,
+    )

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from physim_gate.comparison import ComparisonResult, MetricComparison, RunSummary, Verdict
-from physim_gate.reporting.format import interval, method_label, num, signed
+from physim_gate.reporting.format import count, interval, method_label, num, signed
 
 MARKER = "<!-- physim-gate -->"
 #: Keeps short values on one line in narrow tables such as pull-request comments.
@@ -66,14 +66,6 @@ def _metric_name(metric: MetricComparison) -> str:
     return f"{code_span(metric.name)}{arrow}{unit}{optional}"
 
 
-def _count(metric: MetricComparison) -> str:
-    if metric.pairing is not None and metric.pairing.mode == "paired":
-        return str(metric.pairing.n_pairs)
-    if metric.baseline is not None and metric.candidate is not None:
-        return f"{metric.baseline.n}/{metric.candidate.n}"
-    return "-"
-
-
 def _row(metric: MetricComparison) -> str:
     n = metric.numerical
     cells = [
@@ -83,7 +75,7 @@ def _row(metric: MetricComparison) -> str:
         signed(n.degradation) if n else "-",
         interval(metric.evidence.degradation_ci).replace(", ", "," + NBSP),
         num(n.margin) if n else "-",
-        _count(metric),
+        count(metric).replace(" ", NBSP),
         _verdict(metric),
     ]
     return "| " + " | ".join(cells) + " |"
@@ -149,10 +141,13 @@ def _render(
         ]
     if folded:
         lines += [f"{folded} passing metric(s) not listed; see the HTML report.", ""]
-    lines.append(
+    legend = (
         "<sub>Degradation > 0 means worse. Interval: confidence interval of the degradation. "
-        "n: matched pairs, or baseline/candidate observations.</sub>"
+        "n: matched pairs, or baseline/candidate observations"
     )
+    if any(m.clusters is not None for m in result.metrics):
+        legend += ", or the runs or clusters whose means were compared"
+    lines.append(legend + ".</sub>")
     lines.append("")
 
     issues = [f"- **blocking:** {cell(i)}" for i in result.run_blocking_issues]

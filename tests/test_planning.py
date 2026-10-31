@@ -11,7 +11,8 @@ from typer.testing import CliRunner
 
 from physim_gate.adapters.base import get_adapter
 from physim_gate.cli import app
-from physim_gate.comparison import ComparisonResult
+from physim_gate.combine import combine_runs
+from physim_gate.comparison import ComparisonResult, Verdict
 from physim_gate.config import GateConfig, load_config
 from physim_gate.engine import compare_runs
 from physim_gate.planning import (
@@ -22,10 +23,11 @@ from physim_gate.planning import (
     binary_verdict_probabilities,
     paired_binary_verdict_probabilities,
     plan_binary,
+    plan_clusters,
     plan_continuous,
     plan_from_comparison,
 )
-from physim_gate.schema import Direction, dump_json
+from physim_gate.schema import Direction, RunResult, dump_json
 from physim_gate.stats import newcombe_counts
 from tests.conftest import make_run
 
@@ -306,10 +308,11 @@ def test_plan_cli_with_pilot_and_pairing(tmp_path: Path) -> None:
     runner = CliRunner()
     pilot = tmp_path / "comparison.json"
     pilot.write_text(dump_json(_pusht_comparison()))
-    result = runner.invoke(app, ["plan", "--from", str(pilot)])
+    result = runner.invoke(app, ["plan", "--from", str(pilot)], env={"COLUMNS": "80"})
     assert result.exit_code == 0, result.output
     assert "success" in result.output
     assert "trials per run" in result.output
+    assert not [line for line in result.output.splitlines() if line.endswith(" ")]
     as_json = json.loads(runner.invoke(app, ["plan", "--from", str(pilot), "-f", "json"]).stdout)
     assert [item["metric"] for item in as_json] == ["success", "max_reward", "sum_reward"]
     assert as_json[0]["plan"]["goal"] == "fail"
@@ -373,3 +376,62 @@ def test_plan_from_an_underpowered_pilot_keeps_method_and_confidence(pairing: st
     assert small.method == large.method  # type: ignore[attr-defined]
     assert "normal approximation" not in small.method  # type: ignore[attr-defined]
     assert small.trials == large.trials  # type: ignore[attr-defined]
+
+
+def test_cluster_plan_matches_the_engine() -> None:
+    """The planned number of clusters reaches the goal about as often as planned."""
+    plan = plan_clusters(1.0, 0.5, true_degradation=1.6, min_clusters=3)
+    assert plan.unit == "clusters"
+    k = plan.trials
+    assert k is not None
+    assert plan.probabilities is not None
+    rng = random.Random(7)
+    config = GateConfig.model_validate(
+        {"version": 1, "metrics": {"m": {"max_absolute_degradation": 0.5, "cluster_by": "seed"}}}
+    )
+    fails = 0
+    reps = 400
+    for rep in range(reps):
+        runs = []
+        for side, center in (("b", 10.0), ("c", 10.0 - 1.6)):
+            trials = [
+                {
+                    "trial_id": f"{side}{i}",
+                    "metrics": {"m": rng.gauss(center, 1.0)},
+                    "labels": {"seed": f"{side}{i}"},
+                }
+                for i in range(k)
+            ]
+            runs.append(
+                RunResult.model_validate(
+                    {
+                        "run_id": f"{side}{rep}",
+                        "simulator": {"name": "plan-check"},
+                        "scenario": {"id": "s"},
+                        "metrics": {"m": {"direction": "higher_is_better"}},
+                        "trials": trials,
+                    }
+                )
+            )
+        if compare_runs(runs[0], runs[1], config).metrics[0].verdict is Verdict.FAIL:
+            fails += 1
+    assert fails / reps == pytest.approx(plan.probabilities.fail, abs=0.06)
+
+
+def test_plan_from_a_clustered_pilot_counts_runs(tmp_path: Path) -> None:
+    def run(run_id: str, center: float) -> RunResult:
+        return make_run({"m": [center - 0.1, center, center + 0.1] * 5}, run_id=run_id)
+
+    base = combine_runs(
+        "baseline", ["s0", "s1", "s2"], [run(f"b{i}", 10 + i / 5) for i in range(3)]
+    )
+    cand = combine_runs(
+        "candidate", ["t0", "t1", "t2"], [run(f"c{i}", 9.8 + i / 3) for i in range(3)]
+    )
+    config = GateConfig.model_validate(
+        {"version": 1, "metrics": {"m": {"max_absolute_degradation": 0.5}}}
+    ).with_default_cluster_by("physim.run")
+    (item,) = plan_from_comparison(compare_runs(base, cand, config))
+    assert item.plan is not None
+    assert item.plan.unit == "runs"
+    assert item.plan.kind == "clusters"

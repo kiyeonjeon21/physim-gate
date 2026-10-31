@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+from physim_gate.combine import RUN_LABEL
 from physim_gate.comparison import MetricComparison
 
 
@@ -47,6 +48,27 @@ def interval(bounds: tuple[float, float] | None, digits: int = 4) -> str:
     return f"[{texts[0]}, {texts[1]}]"
 
 
+def cluster_word(metric: MetricComparison) -> str:
+    """What a cluster is called: "runs" for combined run files, else "clusters"."""
+    clusters = metric.clusters
+    return "runs" if clusters is not None and clusters.label == RUN_LABEL else "clusters"
+
+
+def count(metric: MetricComparison) -> str:
+    """The sample size behind the interval: pairs, baseline/candidate, or clusters."""
+    clusters = metric.clusters
+    if clusters is not None:
+        word = cluster_word(metric)
+        if clusters.mode == "paired":
+            return f"{len(clusters.baseline_means)} {word}"
+        return f"{len(clusters.baseline_means)}/{len(clusters.candidate_means)} {word}"
+    if metric.pairing is not None and metric.pairing.mode == "paired":
+        return str(metric.pairing.n_pairs)
+    if metric.baseline is not None and metric.candidate is not None:
+        return f"{metric.baseline.n}/{metric.candidate.n}"
+    return "-"
+
+
 def unit_suffix(metric: MetricComparison) -> str:
     return f" {metric.unit}" if metric.unit else ""
 
@@ -68,6 +90,8 @@ _METHOD_LABELS = {
     "unpaired_bootstrap_expanded": "unpaired bootstrap, expanded percentile",
     "paired_newcombe": "paired score interval (Newcombe)",
     "unpaired_newcombe": "unpaired score interval (Newcombe)",
+    "paired_cluster_t": "paired t interval over cluster means",
+    "unpaired_cluster_t": "Welch t interval over cluster means",
 }
 
 
@@ -84,4 +108,8 @@ def method_label(metric: MetricComparison) -> str | None:
 
 def interval_kind(metric: MetricComparison) -> str:
     method = metric.evidence.method or ""
-    return "score interval" if method.endswith("newcombe") else "bootstrap interval"
+    if method.endswith("newcombe"):
+        return "score interval"
+    if method.endswith("cluster_t"):
+        return "t interval"
+    return "bootstrap interval"

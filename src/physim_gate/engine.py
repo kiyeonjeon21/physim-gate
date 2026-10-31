@@ -16,7 +16,9 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from physim_gate import __version__
+from physim_gate.combine import RUN_LABEL
 from physim_gate.comparison import (
+    ClusterInfo,
     ComparisonResult,
     Evidence,
     ExitCode,
@@ -55,9 +57,11 @@ from physim_gate.stats import (
     newcombe_difference,
     stat_fn,
     stdev,
+    t_interval_difference,
 )
 
 _MAX_LISTED_IDS = 20
+_MAX_LISTED_MEANS = 10
 
 
 class _Invalid(Exception):
@@ -71,6 +75,15 @@ class _Samples:
     baseline_ids: list[str]
     candidate_ids: list[str]
     pairing: PairingInfo
+
+
+@dataclass
+class _Clusters:
+    """Cluster means in comparison order: matched pairs first when ``info.mode`` is paired."""
+
+    baseline: list[float]
+    candidate: list[float]
+    info: ClusterInfo
 
 
 def compare_runs(
@@ -230,6 +243,11 @@ def _compare_metric(
         unit, direction = _metric_identity(gate, baseline, candidate)
         base |= {"unit": unit, "direction": direction}
         samples = _collect_samples(gate, baseline, candidate)
+        clusters = (
+            None
+            if gate.cluster_by is None
+            else _collect_clusters(gate, gate.cluster_by, samples, baseline, candidate)
+        )
     except _Invalid as exc:
         return _finish(
             base,
@@ -240,17 +258,24 @@ def _compare_metric(
         )
 
     base |= {
-        "pairing": samples.pairing,
+        "pairing": samples.pairing if clusters is None else None,
+        "clusters": None if clusters is None else clusters.info,
         "baseline": _summarize(samples.baseline, samples.baseline_ids, baseline, gate.name),
         "candidate": _summarize(samples.candidate, samples.candidate_ids, candidate, gate.name),
     }
     reasons: list[str] = []
-    if samples.pairing.note:
-        reasons.append(samples.pairing.note)
+    note = samples.pairing.note if clusters is None else clusters.info.note
+    if note:
+        reasons.append(note)
 
-    fn = stat_fn(gate.statistic)
-    b_stat = fn(samples.baseline)
-    c_stat = fn(samples.candidate)
+    if clusters is None:
+        fn = stat_fn(gate.statistic)
+        b_stat = fn(samples.baseline)
+        c_stat = fn(samples.candidate)
+    else:
+        # Every cluster weighs the same, whatever its number of trials.
+        b_stat = mean(clusters.baseline)
+        c_stat = mean(clusters.candidate)
     sign = 1.0 if direction is Direction.LOWER_IS_BETTER else -1.0
     degradation = sign * (c_stat - b_stat)
 
@@ -276,6 +301,21 @@ def _compare_metric(
         exceeds_margin=degradation > margin,
     )
     base["numerical"] = numerical
+
+    if clusters is not None:
+        return _compare_clusters(
+            gate,
+            base,
+            config,
+            clusters,
+            samples,
+            sign=sign,
+            margin=margin,
+            unit=unit,
+            exceeds_margin=numerical.exceeds_margin,
+            adjusted_confidence=adjusted_confidence,
+            reasons=reasons,
+        )
 
     paired = samples.pairing.mode == "paired"
     n_effective = (
@@ -326,28 +366,15 @@ def _compare_metric(
         method = "paired_bootstrap" if paired else "unpaired_bootstrap"
         if gate.bootstrap_method is BootstrapMethod.EXPANDED:
             method += "_expanded"
-    excess_low, excess_high = boot.excess
-    pct = _pct(adjusted_confidence)
-    if excess_low > 0:
-        outcome, verdict = Evidence.REGRESSION, Verdict.FAIL
-        reasons.append(
-            f"regression: the {pct} interval of the degradation lies entirely above the "
-            f"allowed margin ({_fmt(margin)}{_unit(unit)})"
-        )
-    elif excess_high <= 0:
-        outcome, verdict = Evidence.NON_INFERIOR, Verdict.PASS
-        reasons.append(
-            f"no regression: the {pct} interval of the degradation lies at or below the "
-            f"allowed margin ({_fmt(margin)}{_unit(unit)})"
-        )
-    else:
-        outcome, verdict = Evidence.INCONCLUSIVE, Verdict.INCONCLUSIVE
-        observed = "exceeds" if numerical.exceeds_margin else "is within"
-        reasons.append(
-            f"inconclusive: the observed degradation {observed} the margin, but the {pct} "
-            "interval straddles it; more trials would narrow the interval"
-        )
-
+    outcome, verdict = _classify(
+        boot.excess,
+        adjusted_confidence,
+        margin=margin,
+        unit=unit,
+        exceeds_margin=numerical.exceeds_margin,
+        more="trials",
+        reasons=reasons,
+    )
     evidence = StatisticalEvidence(
         outcome=outcome,
         method=method,
@@ -359,6 +386,153 @@ def _compare_metric(
         excess_ci=boot.excess,
     )
     return _finish(base, config, evidence=evidence, verdict=verdict, reasons=reasons)
+
+
+def _classify(
+    excess: tuple[float, float],
+    confidence: float,
+    *,
+    margin: float,
+    unit: str,
+    exceeds_margin: bool,
+    more: str,
+    reasons: list[str],
+) -> tuple[Evidence, Verdict]:
+    """Classify the interval of the excess over the margin; append the reason."""
+    excess_low, excess_high = excess
+    pct = _pct(confidence)
+    if excess_low > 0:
+        reasons.append(
+            f"regression: the {pct} interval of the degradation lies entirely above the "
+            f"allowed margin ({_fmt(margin)}{_unit(unit)})"
+        )
+        return Evidence.REGRESSION, Verdict.FAIL
+    if excess_high <= 0:
+        reasons.append(
+            f"no regression: the {pct} interval of the degradation lies at or below the "
+            f"allowed margin ({_fmt(margin)}{_unit(unit)})"
+        )
+        return Evidence.NON_INFERIOR, Verdict.PASS
+    observed = "exceeds" if exceeds_margin else "is within"
+    reasons.append(
+        f"inconclusive: the observed degradation {observed} the margin, but the {pct} "
+        f"interval straddles it; more {more} would narrow the interval"
+    )
+    return Evidence.INCONCLUSIVE, Verdict.INCONCLUSIVE
+
+
+def _compare_clusters(
+    gate: ResolvedMetricGate,
+    base: dict[str, object],
+    config: GateConfig,
+    clusters: _Clusters,
+    samples: _Samples,
+    *,
+    sign: float,
+    margin: float,
+    unit: str,
+    exceeds_margin: bool,
+    adjusted_confidence: float,
+    reasons: list[str],
+) -> MetricComparison:
+    """Gate on a t interval over cluster means, so that variation between clusters counts."""
+    paired = clusters.info.mode == "paired"
+    reasons.insert(0, _describe_clusters(clusters.info))
+    n_effective = (
+        len(clusters.baseline) if paired else min(len(clusters.baseline), len(clusters.candidate))
+    )
+    if n_effective < gate.min_clusters:
+        unit_word = "matched clusters" if paired else "clusters in the smaller run"
+        reasons.append(
+            f"insufficient clusters: {n_effective} {unit_word} ({gate.cluster_by}), "
+            f"min_clusters is {gate.min_clusters}; no confidence interval computed"
+        )
+        return _finish(
+            base,
+            config,
+            evidence=StatisticalEvidence(outcome=Evidence.INSUFFICIENT_SAMPLES),
+            verdict=Verdict.INCONCLUSIVE,
+            reasons=reasons,
+        )
+    t = t_interval_difference(
+        clusters.baseline, clusters.candidate, paired=paired, confidence=adjusted_confidence
+    )
+    scale = max(abs(v) for v in clusters.baseline + clusters.candidate)
+    if t.standard_error <= 1e-12 * scale:
+        # The cluster means agree exactly (all 0 of N, say), up to rounding, so their spread
+        # says nothing about the uncertainty. Fall back to the trials, as if independent.
+        reasons.append(
+            "the cluster means do not vary, so the interval comes from the trials, compared as "
+            "independent samples"
+        )
+        degradation_ci, method = _trial_interval(gate, samples, sign, adjusted_confidence)
+    else:
+        low, high = t.low, t.high
+        degradation_ci = (low, high) if sign > 0 else (-high, -low)
+        method = "paired_cluster_t" if paired else "unpaired_cluster_t"
+    excess = (degradation_ci[0] - margin, degradation_ci[1] - margin)
+    outcome, verdict = _classify(
+        excess,
+        adjusted_confidence,
+        margin=margin,
+        unit=unit,
+        exceeds_margin=exceeds_margin,
+        more="runs" if clusters.info.label == RUN_LABEL else "clusters",
+        reasons=reasons,
+    )
+    evidence = StatisticalEvidence(
+        outcome=outcome,
+        method=method,
+        confidence=gate.confidence,
+        adjusted_confidence=adjusted_confidence,
+        degradation_ci=degradation_ci,
+        excess_ci=excess,
+    )
+    return _finish(base, config, evidence=evidence, verdict=verdict, reasons=reasons)
+
+
+def _describe_clusters(info: ClusterInfo) -> str:
+    """One line naming the clusters and their means, for every report."""
+    word = "runs" if info.label == RUN_LABEL else "clusters"
+
+    def means(values: dict[str, float]) -> str:
+        shown = ", ".join(f"{k} {_fmt(v)}" for k, v in list(values.items())[:_MAX_LISTED_MEANS])
+        more = len(values) - _MAX_LISTED_MEANS
+        return shown + (f" and {more} more" if more > 0 else "")
+
+    how = "matched by name" if info.mode == "paired" else "as independent samples"
+    return (
+        f"compared by {info.label}: the means of {len(info.baseline_means)} baseline and "
+        f"{len(info.candidate_means)} candidate {word}, {how} (baseline "
+        f"{means(info.baseline_means)}; candidate {means(info.candidate_means)})"
+    )
+
+
+def _trial_interval(
+    gate: ResolvedMetricGate, samples: _Samples, sign: float, confidence: float
+) -> tuple[tuple[float, float], str]:
+    """An unpaired interval of the degradation over every trial, ignoring clusters."""
+    if is_binary(samples.baseline + samples.candidate):
+        low, high = newcombe_difference(
+            samples.baseline, samples.candidate, paired=False, confidence=confidence
+        )
+        return ((low, high) if sign > 0 else (-high, -low)), "unpaired_newcombe"
+    boot = bootstrap_degradation(
+        samples.baseline,
+        samples.candidate,
+        paired=False,
+        statistic=Statistic.MEAN,
+        sign=sign,
+        margin=lambda _b: 0.0,
+        confidence=confidence,
+        resamples=gate.bootstrap_resamples,
+        seed=f"{gate.bootstrap_seed}:{gate.name}",
+        method=gate.bootstrap_method,
+    )
+    method = "unpaired_bootstrap"
+    if gate.bootstrap_method is BootstrapMethod.EXPANDED:
+        method += "_expanded"
+    return boot.degradation, method
 
 
 def _finish(
@@ -451,7 +625,8 @@ def _collect_samples(
                 "failures stay visible"
             )
 
-    if gate.pairing is Pairing.UNPAIRED:
+    if gate.pairing is Pairing.UNPAIRED or gate.cluster_by is not None:
+        # With clusters, the clusters are matched instead (see _collect_clusters).
         mode, note = "unpaired", None
     elif gate.pairing is Pairing.PAIRED:
         if not b_keys & c_keys:
@@ -506,6 +681,79 @@ def _collect_samples(
         candidate_ids=[k for k, _ in c_obs],
         pairing=pairing,
     )
+
+
+def _collect_clusters(
+    gate: ResolvedMetricGate,
+    label: str,
+    samples: _Samples,
+    baseline: RunResult,
+    candidate: RunResult,
+) -> _Clusters:
+    """Group each run's observations by the value of trial label ``label``."""
+    grouped: list[dict[str, list[float]]] = []
+    for side, run, ids, values in (
+        ("baseline", baseline, samples.baseline_ids, samples.baseline),
+        ("candidate", candidate, samples.candidate_ids, samples.candidate),
+    ):
+        labels = {t.trial_id: t.labels.get(label) for t in run.trials}
+        unlabeled = [i for i in ids if labels.get(i) is None]
+        if unlabeled:
+            raise _Invalid(
+                f"cluster_by is {label!r}, but {len(unlabeled)} of {len(ids)} {side} trials have "
+                f"no such label (for example {unlabeled[0]!r}); label every trial, or remove "
+                "cluster_by"
+            )
+        groups: dict[str, list[float]] = {}
+        for trial_id, value in zip(ids, values, strict=True):
+            groups.setdefault(str(labels[trial_id]), []).append(value)
+        grouped.append(groups)
+    b_groups, c_groups = grouped
+    b_keys, c_keys = set(b_groups), set(c_groups)
+
+    note = None
+    if gate.pairing is Pairing.PAIRED:
+        if not b_keys & c_keys:
+            raise _Invalid(f"pairing is 'paired' but no {label} value appears in both runs")
+        mode = "paired"
+    elif gate.pairing is Pairing.AUTO and b_keys == c_keys:
+        mode = "paired"
+    else:
+        mode = "unpaired"
+        if gate.pairing is Pairing.AUTO and b_keys & c_keys:
+            note = (
+                f"{label} values differ between runs, so clusters are compared as independent "
+                "samples (set pairing: paired to match on the shared values instead)"
+            )
+
+    unmatched_b: list[str] = []
+    unmatched_c: list[str] = []
+    if mode == "paired":
+        shared = [k for k in b_groups if k in c_keys]
+        unmatched_b = [k for k in b_groups if k not in c_keys]
+        unmatched_c = [k for k in c_groups if k not in b_keys]
+        if unmatched_b or unmatched_c:
+            note = (
+                f"{len(unmatched_b)} baseline and {len(unmatched_c)} candidate clusters have no "
+                "match and are excluded"
+            )
+        b_order, c_order = shared, shared
+    else:
+        b_order, c_order = list(b_groups), list(c_groups)
+    b_means = {k: mean(b_groups[k]) for k in b_order}
+    c_means = {k: mean(c_groups[k]) for k in c_order}
+    info = ClusterInfo(
+        label=label,
+        mode=mode,
+        baseline_means=b_means,
+        candidate_means=c_means,
+        baseline_trials={k: len(b_groups[k]) for k in b_order},
+        candidate_trials={k: len(c_groups[k]) for k in c_order},
+        unmatched_baseline=unmatched_b[:_MAX_LISTED_IDS],
+        unmatched_candidate=unmatched_c[:_MAX_LISTED_IDS],
+        note=note,
+    )
+    return _Clusters(baseline=list(b_means.values()), candidate=list(c_means.values()), info=info)
 
 
 def _margin(

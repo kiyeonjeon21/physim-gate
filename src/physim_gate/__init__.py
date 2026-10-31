@@ -12,6 +12,7 @@ from __future__ import annotations
 
 __version__ = "0.4.0"
 
+from physim_gate.combine import RUN_LABEL, combine_runs
 from physim_gate.comparison import (
     ComparisonResult,
     Evidence,
@@ -38,6 +39,7 @@ from physim_gate.schema import (
 
 __all__ = [
     "FAILURE_RATE_METRIC",
+    "RUN_LABEL",
     "ComparisonResult",
     "Direction",
     "Domain",
@@ -53,6 +55,7 @@ __all__ = [
     "TrialStatus",
     "Verdict",
     "__version__",
+    "combine_runs",
     "compare_runs",
     "dump_json",
     "load_comparison",

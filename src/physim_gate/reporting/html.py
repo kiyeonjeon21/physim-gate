@@ -10,8 +10,16 @@ import json
 import math
 from html import escape
 
-from physim_gate.comparison import ComparisonResult, Evidence, MetricComparison, RunSummary, Verdict
+from physim_gate.comparison import (
+    ComparisonResult,
+    Evidence,
+    InputRef,
+    MetricComparison,
+    RunSummary,
+    Verdict,
+)
 from physim_gate.reporting.format import (
+    cluster_word,
     direction_label,
     interval,
     interval_kind,
@@ -226,6 +234,43 @@ def _degradation(metric: MetricComparison) -> str:
     )
 
 
+def _cluster_table(metric: MetricComparison) -> str:
+    clusters = metric.clusters
+    if clusters is None:
+        return ""
+    word = cluster_word(metric)
+    key = "run" if word == "runs" else clusters.label
+    if clusters.mode == "paired":
+        rows = "".join(
+            f"<tr><td>{_e(k)}</td><td>{_e(num(bv, 6))}</td>"
+            f"<td>{_e(num(clusters.candidate_means[k], 6))}</td>"
+            f"<td>{_e(signed(clusters.candidate_means[k] - bv, 6))}</td></tr>"
+            for k, bv in clusters.baseline_means.items()
+        )
+        head = (
+            f"<tr><th>{_e(key)}</th><th>baseline mean</th><th>candidate mean</th>"
+            "<th>difference</th></tr>"
+        )
+    else:
+        b_items = list(clusters.baseline_means.items())
+        c_items = list(clusters.candidate_means.items())
+        rows = ""
+        for i in range(max(len(b_items), len(c_items))):
+            cells = [
+                f"{_e(items[i][0])}: {_e(num(items[i][1], 6))}" if i < len(items) else ""
+                for items in (b_items, c_items)
+            ]
+            rows += "<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
+        head = f"<tr><th>baseline ({_e(key)}: mean)</th><th>candidate ({_e(key)}: mean)</th></tr>"
+    return (
+        f'<details class="data" open><summary>Means of the {_e(word)} compared '
+        f"({len(clusters.baseline_means)} baseline, {len(clusters.candidate_means)} candidate)"
+        "</summary>"
+        f'<div class="scroll"><table class="num"><thead>{head}</thead><tbody>{rows}</tbody></table></div>'
+        "</details>"
+    )
+
+
 def _data_table(metric: MetricComparison) -> str:
     b, c = metric.baseline, metric.candidate
     if b is None or c is None:
@@ -273,7 +318,17 @@ def _facts(metric: MetricComparison) -> str:
             )
         )
     items.append(("evidence", _EVIDENCE_TEXT[ev.outcome]))
-    if metric.pairing is not None:
+    clusters = metric.clusters
+    if clusters is not None:
+        word = cluster_word(metric)
+        if clusters.mode == "paired":
+            sizes = f"{len(clusters.baseline_means)} matched {word}"
+        else:
+            sizes = f"{len(clusters.baseline_means)} vs {len(clusters.candidate_means)} {word}"
+        if word == "clusters":
+            sizes += f" ({clusters.label})"
+        items.append(("samples", sizes))
+    elif metric.pairing is not None:
         if metric.pairing.mode == "paired":
             items.append(("samples", f"{metric.pairing.n_pairs} matched pairs"))
         elif metric.baseline is not None and metric.candidate is not None:
@@ -307,6 +362,7 @@ def _metric_card(metric: MetricComparison) -> str:
         f"{_facts(metric)}"
         f"{_degradation(metric)}"
         f"{_distribution(metric)}"
+        f"{_cluster_table(metric)}"
         f"{_data_table(metric)}"
         "</section>"
     )
@@ -513,13 +569,19 @@ def render_html(result: ComparisonResult) -> str:
         f'<li class="blocking">{_e(i)}</li>' for i in result.run_blocking_issues
     ) + "".join(f"<li>{_e(i)}</li>" for i in result.run_issues)
     inputs = result.inputs
+    refs: list[tuple[str, InputRef]] = []
+    for label, ref, parts in (
+        ("baseline", inputs.baseline, inputs.baseline_runs),
+        ("candidate", inputs.candidate, inputs.candidate_runs),
+    ):
+        if parts:
+            refs += [(f"{label} {i}/{len(parts)}", part) for i, part in enumerate(parts, 1)]
+        else:
+            refs.append((label, ref))
+    refs.append(("config", inputs.config))
     input_rows = "".join(
         f"<tr><th>{label}</th><td class='mono'>{_e(ref.path or '-')}</td><td class='mono'>{_e(ref.sha256 or '-')}</td></tr>"
-        for label, ref in (
-            ("baseline", inputs.baseline),
-            ("candidate", inputs.candidate),
-            ("config", inputs.config),
-        )
+        for label, ref in refs
     )
     config_json = json.dumps(result.config.model_dump(mode="json"), indent=2)
     untracked = (
@@ -566,7 +628,7 @@ def render_html(result: ComparisonResult) -> str:
 </section>
 
 <footer>
-<p>How to read this: degradation is candidate minus baseline, signed so that positive is worse. A metric FAILs only when the whole confidence interval lies beyond the allowed margin, and PASSes only when it lies entirely within it. Otherwise the evidence is inconclusive. Intervals are a bootstrap for continuous metrics and a Newcombe score interval for 0/1 metrics. Both are approximate, and the bootstrap can be too narrow with few trials. Matching seeds do not guarantee identical physics. See docs/comparison-semantics.md.</p>
+<p>How to read this: degradation is candidate minus baseline, signed so that positive is worse. A metric FAILs only when the whole confidence interval lies beyond the allowed margin, and PASSes only when it lies entirely within it. Otherwise the evidence is inconclusive. Intervals are a bootstrap for continuous metrics and a Newcombe score interval for 0/1 metrics, or a t interval over cluster means when trials are grouped into runs or clusters. All are approximate, and the bootstrap can be too narrow with few trials. Matching seeds do not guarantee identical physics. See docs/comparison-semantics.md.</p>
 <p>Generated {_e(result.generated_at.isoformat())} by physim-gate {_e(result.tool.version)} · comparison schema {_e(result.schema_version)}</p>
 </footer>
 </main>

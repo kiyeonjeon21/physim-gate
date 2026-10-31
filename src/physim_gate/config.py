@@ -56,6 +56,8 @@ class _Model(BaseModel):
 
 Confidence = Annotated[float, Field(gt=0.5, lt=1.0)]
 MinSamples = Annotated[int, Field(ge=2)]
+MinClusters = Annotated[int, Field(ge=2)]
+LabelName = Annotated[str, Field(min_length=1)]
 Fraction = Annotated[float, Field(ge=0.0, le=1.0)]
 Resamples = Annotated[int, Field(ge=1000, le=1_000_000)]
 
@@ -69,6 +71,8 @@ class Defaults(_Model):
     bootstrap_resamples: Resamples = 10_000
     bootstrap_seed: int = 0
     bootstrap_method: BootstrapMethod = BootstrapMethod.EXPANDED
+    cluster_by: LabelName | None = None
+    min_clusters: MinClusters = 3
 
 
 class Policy(_Model):
@@ -90,6 +94,8 @@ class MetricGate(_Model):
     min_samples: MinSamples | None = None
     pairing: Pairing | None = None
     max_missing_fraction: Fraction | None = None
+    cluster_by: LabelName | None = None
+    min_clusters: MinClusters | None = None
 
     @model_validator(mode="after")
     def _needs_threshold(self) -> Self:
@@ -117,6 +123,8 @@ class ResolvedMetricGate(_Model):
     bootstrap_resamples: int
     bootstrap_seed: int
     bootstrap_method: BootstrapMethod
+    cluster_by: str | None
+    min_clusters: int
 
 
 class GateConfig(_Model):
@@ -124,6 +132,24 @@ class GateConfig(_Model):
     defaults: Defaults = Field(default_factory=Defaults)
     policy: Policy = Field(default_factory=Policy)
     metrics: Annotated[dict[str, MetricGate], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def _clusters_need_the_mean(self) -> Self:
+        for name in self.metrics:
+            gate = self.resolve(name)
+            if gate.cluster_by is not None and gate.statistic is not Statistic.MEAN:
+                raise ValueError(
+                    f"metric {name!r}: cluster_by compares the mean of each cluster, so it needs "
+                    "statistic: mean"
+                )
+        return self
+
+    def with_default_cluster_by(self, label: str) -> GateConfig:
+        """This config with ``defaults.cluster_by`` set to ``label``, unless it is already set."""
+        if self.defaults.cluster_by is not None:
+            return self
+        defaults = self.defaults.model_copy(update={"cluster_by": label})
+        return GateConfig.model_validate({**self.model_dump(), "defaults": defaults.model_dump()})
 
     def adjusted_confidence(self, name: str) -> float:
         """The confidence of one metric's interval after any multiple-testing correction."""
@@ -153,6 +179,8 @@ class GateConfig(_Model):
             bootstrap_resamples=d.bootstrap_resamples,
             bootstrap_seed=d.bootstrap_seed,
             bootstrap_method=d.bootstrap_method,
+            cluster_by=gate.cluster_by or d.cluster_by,
+            min_clusters=gate.min_clusters or d.min_clusters,
         )
 
 

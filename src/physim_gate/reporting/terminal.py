@@ -13,7 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from physim_gate.comparison import ComparisonResult, MetricComparison, RunSummary, Verdict
-from physim_gate.reporting.format import interval, num, signed, unit_suffix
+from physim_gate.reporting.format import count, interval, num, signed, unit_suffix
 
 VERDICT_STYLE = {
     Verdict.PASS: "bold green",
@@ -85,14 +85,6 @@ def _verdict(metric: MetricComparison) -> Text:
     return text
 
 
-def _count(metric: MetricComparison) -> str:
-    if metric.pairing is not None and metric.pairing.mode == "paired":
-        return str(metric.pairing.n_pairs)
-    if metric.baseline is not None and metric.candidate is not None:
-        return f"{metric.baseline.n}/{metric.candidate.n}"
-    return "-"
-
-
 def _table(result: ComparisonResult) -> Table:
     table = Table(show_edge=False, pad_edge=False, header_style="bold")
     table.add_column("metric", no_wrap=True)
@@ -112,7 +104,7 @@ def _table(result: ComparisonResult) -> Table:
             signed(n.degradation) if n else "-",
             interval(m.evidence.degradation_ci),
             num(n.margin) if n else "-",
-            _count(m),
+            count(m),
             _verdict(m),
         )
     return table
@@ -142,7 +134,7 @@ def _blocks(console: Console, result: ComparisonResult) -> None:
             console.print(
                 Padding(
                     Text(
-                        f"interval {interval(m.evidence.degradation_ci)}, n {_count(m)}",
+                        f"interval {interval(m.evidence.degradation_ci)}, n {count(m)}",
                         style="dim",
                     ),
                     (0, 0, 0, 2),
@@ -193,6 +185,8 @@ def print_comparison(
             "degradation > 0 means worse; interval = confidence interval of the degradation; "
             "n = matched pairs or baseline/candidate observations"
         )
+        if any(m.clusters is not None for m in result.metrics):
+            legend += ", or the runs or clusters whose means were compared"
         for line in _wrap(legend, console.width):
             console.print(Text(line, style="dim"), soft_wrap=True)
     else:

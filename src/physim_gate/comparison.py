@@ -30,7 +30,7 @@ from physim_gate.schema import (
 
 COMPARISON_KIND = "physim-gate.comparison"
 COMPARISON_SCHEMA_MAJOR = 1
-COMPARISON_SCHEMA_VERSION = "1.0"
+COMPARISON_SCHEMA_VERSION = "1.1"
 
 
 class ExitCode(IntEnum):
@@ -97,6 +97,25 @@ class PairingInfo(_Model):
     note: str | None = None
 
 
+class ClusterInfo(_Model):
+    """How trials were grouped into clusters (``cluster_by``) and each cluster's mean.
+
+    With clusters the unit of comparison is the cluster, not the trial: the interval comes from
+    the spread of the cluster means, so variation between clusters (training seeds, say) is
+    counted. ``mode`` says whether clusters were matched by their label value.
+    """
+
+    label: str
+    mode: Literal["paired", "unpaired"]
+    baseline_means: dict[str, float]
+    candidate_means: dict[str, float]
+    baseline_trials: dict[str, int]
+    candidate_trials: dict[str, int]
+    unmatched_baseline: list[str] = Field(default_factory=list)
+    unmatched_candidate: list[str] = Field(default_factory=list)
+    note: str | None = None
+
+
 class Numerical(_Model):
     """Point estimates. ``degradation > 0`` always means the candidate is worse."""
 
@@ -129,6 +148,7 @@ class MetricComparison(_Model):
     statistic: Statistic
     min_samples: int
     pairing: PairingInfo | None = None
+    clusters: ClusterInfo | None = None
     baseline: SampleSummary | None = None
     candidate: SampleSummary | None = None
     numerical: Numerical | None = None
@@ -160,10 +180,15 @@ class InputRef(_Model):
 
 
 class Inputs(_Model):
+    """The files compared. A side read from several files lists them in ``*_runs``; its
+    ``sha256`` then digests the files' digests in order."""
+
     baseline: InputRef = Field(default_factory=InputRef)
     candidate: InputRef = Field(default_factory=InputRef)
     config: InputRef = Field(default_factory=InputRef)
     adapter: str | None = None
+    baseline_runs: list[InputRef] = Field(default_factory=list)
+    candidate_runs: list[InputRef] = Field(default_factory=list)
 
 
 class Tool(_Model):
