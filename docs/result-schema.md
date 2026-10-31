@@ -11,7 +11,8 @@ A reader accepts any minor version of the major versions it supports and rejects
 Minor versions only add optional fields.
 Breaking changes bump the major version.
 
-The comparison result has its own version (`kind: "physim-gate.comparison"`, `schema_version: "1.0"`), described in [`schemas/comparison.schema.json`](../schemas/comparison.schema.json).
+The comparison result has its own version (`kind: "physim-gate.comparison"`, `schema_version: "1.1"`), described in [`schemas/comparison.schema.json`](../schemas/comparison.schema.json).
+Version 1.1 added `clusters` to each metric (the cluster means behind a `cluster_by` comparison) and `inputs.baseline_runs` / `inputs.candidate_runs` (the files of a side given as several runs).
 
 ## Run result
 
@@ -63,7 +64,7 @@ A run declares what it measured; the gate config chooses what to compare.
 | `metrics` | map of name to number or `null` | no | Every key must be declared in `metrics` |
 | `duration_s` | number `>= 0` | no | Wall-clock duration |
 | `artifacts` | list of artifact refs | no | |
-| `labels` | map of string to string | no | |
+| `labels` | map of string to string | no | `cluster_by` groups trials by one of these, for example `training_seed`. `physim.run` is reserved: PhySim Gate sets it when it combines several run files |
 
 ### Artifact reference
 

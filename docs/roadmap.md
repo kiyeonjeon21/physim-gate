@@ -29,12 +29,17 @@ v0.1.1 fixed the findings of the [OSS readiness review](oss-readiness-review.md)
 - **Suites.** `physim-gate suite` gates several scenarios with one exit code, a JUnit test suite per scenario and one Markdown summary.
 - **Cross-checks** of the statistics against scipy and statsmodels in the test suite.
 
+## v0.5
+
+- **Training runs as clusters.** `cluster_by` compares cluster means (training runs, seeds) with a t interval, so a gate can answer whether a training change, not one checkpoint, is worse. Several `--baseline` / `--candidate` files are combined and clustered by run. `plan --from` a clustered pilot counts runs per side.
+
 ## Next
 
 1. **Stratified comparisons** by trial labels (task, weather, terrain), with per-stratum verdicts; LeRobot already labels each episode with its task.
 2. **Equivalence gates** for "must not change in either direction" checks (calibration, determinism audits).
-3. **LIBERO output.** LeRobot installs LIBERO on Linux only; a recorded LIBERO evaluation would complete the real-data examples.
-4. **ROS 2 bag and PX4 SITL adapters** from recorded fixtures, with user-defined metric extraction.
+3. **LIBERO output.** LeRobot installs LIBERO on Linux only; a recorded LIBERO evaluation would complete the real-data examples. The public LeBoard calibration runs are a candidate.
+4. **Several runs per side in suites and the GitHub Action**, as `compare` already accepts.
+5. **ROS 2 bag and PX4 SITL adapters** from recorded fixtures, with user-defined metric extraction.
 
 ## Later
 

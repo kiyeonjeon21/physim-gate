@@ -26,6 +26,7 @@ your sim job ──> candidate.json ┘          │                 comparison.
 - [Example report](#example-report)
 - [Real simulator data: LeRobot](#real-simulator-data-lerobot)
 - [How many trials do you need?](#how-many-trials-do-you-need)
+- [Comparing training runs, not checkpoints](#comparing-training-runs-not-checkpoints)
 - [Baselines and suites](#baselines-and-suites)
 - [How the verdict is reached](#how-the-verdict-is-reached)
 - [Statistical limitations](#statistical-limitations)
@@ -270,6 +271,33 @@ sum_reward │ 100 pairs │      -27.47 │  8.283 │ PASS │             53 
 
 [docs/comparison-semantics.md](docs/comparison-semantics.md#planning-the-number-of-trials) has the details.
 
+## Comparing training runs, not checkpoints
+
+A comparison of one run against another answers "is this checkpoint worse?".
+When the change is to training (data, recipe, code), the question is usually "is this change worse?", and a second training run with another seed scores differently.
+The trials of one run share that run's luck, so even thousands of episodes cannot answer it.
+In a [simulation](docs/comparison-semantics.md#clusters-several-training-runs-per-side) modeled on LIBERO evaluations, a run-to-run spread of 1.4 success points made a trial-level gate wrong at the margin in up to 7% of comparisons per side, and a spread of 4.2 points in up to 25%.
+
+Give each side several runs, and PhySim Gate compares their means instead:
+
+```text
+$ physim-gate compare --adapter lerobot -O scenario=libero_10 \
+    -b clean-s0/eval_info.json -b clean-s1/eval_info.json -b clean-s2/eval_info.json \
+    -b clean-s3/eval_info.json -b clean-s4/eval_info.json \
+    -c desync-s0/eval_info.json -c desync-s3/eval_info.json -c desync-s4/eval_info.json \
+    -g gate.yaml
+metric    ┃ baseline ┃ candidate ┃ degradation ┃           interval ┃ margin ┃        n ┃ verdict
+━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━
+success ↑ │   0.4216 │    0.3833 │    +0.03827 │ [-0.0356, +0.1122] │      0 │ 5/3 runs │ INCONCLUSIVE
+```
+
+These are the [LeBoard calibration runs](https://huggingface.co/datasets/rogation/leboard-training-runs): SmolVLA fine-tuned on LIBERO-10, once on clean data and once on data whose video lags the actions by 3 frames, each run evaluated on the same 500 episodes.
+Compared episode by episode, one clean run against the lagged run with the same training seed is a `FAIL` for two of the three seeds.
+Across training runs, a 3.8-point drop is not yet distinguishable from the spread between runs, and `physim-gate plan --from` says 8 runs per side would make it so with 80% probability.
+
+Several `-b` or `-c` files set `cluster_by: physim.run`: every trial is labeled with its run, and the interval is a t interval over run means.
+To match runs by training seed across the two sides, label every trial with the seed (`labels: {training_seed: "3"}`) and set `cluster_by: training_seed` in the gate config.
+
 ## Baselines and suites
 
 A baseline is just a run result, but keeping track of which file is "the baseline for this scenario on main" is tedious.
@@ -334,6 +362,7 @@ PhySim Gate makes a narrow, explicit claim, and it is worth knowing where that c
 - **The intervals are approximate.** In a [Monte Carlo study](docs/comparison-semantics.md#measured-error-rates) of the real engine, a metric whose true degradation equals the margin was wrongly called PASS or FAIL in at most 3.4% of runs on each side, including with only 10 trials and against a much larger baseline; the nominal rate is 2.5%. `min_samples` (default 10) is a floor, not a guarantee.
 - **Rare events need many trials.** With a 1% baseline collision rate and a 2-point margin, 80 trials per run give `INCONCLUSIVE` about 89% of the time, even when the candidate's true rate is 6%. That is the honest answer for so little data. `physim-gate plan` tells you how many trials a decision needs.
 - **Each metric is tested separately.** With many gated metrics, the chance that at least one shows a spurious regression grows. `policy.correction: bonferroni` is available but off by default.
+- **One run is one sample of a training process.** A trial-level comparison says whether these runs differ, not whether the training change behind them makes a difference; use [several runs per side](#comparing-training-runs-not-checkpoints) for that.
 - **Seeds do not make physics deterministic.** Matching `trial_id`s are treated as matched *conditions*. Pairing reduces noise from shared conditions; it does not assume bitwise-identical rollouts.
 - **Inconclusive is a real answer.** It means the data cannot tell. The fix is more trials, a less noisy metric, or a deliberate policy decision, not a looser reading of the numbers.
 - **Statistics cannot judge relevance.** Whether a 2-point increase in collision rate matters is a domain decision you encode in the margin.
@@ -443,6 +472,8 @@ for metric in result.metrics:
     print(metric.name, metric.verdict, metric.evidence.degradation_ci)
 Path("report.html").write_text(render_html(result))
 ```
+
+`combine_runs("baseline", names, runs)` merges several runs into one whose trials carry the `physim.run` label (`RUN_LABEL`); compare it under a config from `config.with_default_cluster_by(RUN_LABEL)` to compare run means, as the command line does.
 
 With the `gymnasium` extra, `physim_gate.adapters.gymnasium.run_gymnasium(env_id, policy, seeds=..., run_id=...)` rolls out a policy and returns a run result directly.
 [`examples/gymnasium/`](examples/gymnasium) compares two CartPole controllers this way.

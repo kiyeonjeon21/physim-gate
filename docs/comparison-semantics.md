@@ -76,9 +76,15 @@ Pairing says that both runs faced the same condition.
 It does **not** assume the rollouts are identical: GPU reductions, multithreaded physics, asynchronous sensors and learned policies can all diverge from the same seed.
 Pairing simply removes the part of the variation that comes from the shared condition, which usually makes the comparison much more sensitive.
 
+**Clusters.** With `cluster_by: <label>`, trials are grouped by the value of that trial label, and the comparison is made between the groups' means instead of between trials.
+`pairing` then applies to the clusters: `auto` matches them when both runs have exactly the same set of label values.
+Trials are not matched to each other in this mode.
+Every trial must carry the label, otherwise the metric is `INVALID`.
+See [clusters](#clusters-several-training-runs-per-side) below for why and when.
+
 ## Step 4: point estimates (the numerical layer)
 
-- `baseline`, `candidate`: the statistic of each sample.
+- `baseline`, `candidate`: the statistic of each sample. With `cluster_by`, the mean of the cluster means, so every cluster weighs the same whatever its number of trials.
 - `delta = candidate - baseline`.
 - `degradation`: `delta` signed by direction (positive is worse).
 - `relative_degradation = degradation / |baseline|`, or `null` when the baseline statistic is 0.
@@ -110,6 +116,7 @@ Set `max_absolute_degradation: 0` to tolerate no degradation at all.
 
 If the number of usable observations is below `min_samples` (default 10), no interval is computed and the evidence is `insufficient_samples`.
 For paired comparisons the count is the number of pairs; for unpaired comparisons it is the size of the smaller sample.
+With `cluster_by`, the count is the number of clusters (matched clusters when paired) and the floor is `min_clusters` (default 3).
 
 Otherwise an interval of the degradation is computed.
 The method depends on the data.
@@ -152,6 +159,41 @@ The score interval correctly reflects that 0 of 30 is compatible with a true rat
 
 For 0/1 metrics with a relative margin, the margin is computed once from the baseline's observed rate rather than per replicate.
 The unpaired implementation reproduces the published example (56/70 vs 48/80 gives 0.0524 to 0.3339); see `tests/test_stats.py`.
+
+### Clusters: several training runs per side
+
+A gate over the trials of one run answers "is this checkpoint worse on these conditions?".
+It does not answer "is this training recipe, dataset or code change worse?", because a second training run of the same recipe, with another seed, scores differently.
+The trials of one run share that run's luck, so they are not independent evidence about the recipe.
+Pooling the trials of several runs as if they were independent makes the interval too narrow, and so does a single run per side.
+
+With `cluster_by`, each cluster (typically one training run) contributes its mean, and the interval is a Student t interval over those means:
+
+- **Paired** (matched label values): a paired t interval of the per-cluster differences, with `k - 1` degrees of freedom for `k` matched clusters.
+- **Unpaired:** Welch's t interval of the two sets of cluster means, with Welch-Satterthwaite degrees of freedom.
+
+The trials within a cluster still matter: more of them make each cluster mean more precise, and conditions shared by every run (the same initial states, say) cancel out of the differences between cluster means.
+If the cluster means do not vary at all, their spread says nothing about the uncertainty (every run 0 of 100, say), so the interval falls back to the trials, compared as independent samples, and the report says so.
+
+`physim-gate compare` sets this up when it is given several files for a side: `-b run1.json -b run2.json -b run3.json -c ...`.
+It combines each side's files into one run, labels every trial with `physim.run` (the run's id, or a shortened file name when ids repeat), and sets `cluster_by: physim.run` for every metric that does not set `cluster_by` itself.
+Run names rarely match across the two sides, so runs are compared as independent samples; to match training seeds, label the trials with the seed yourself and set `cluster_by` to that label.
+
+With few clusters, the t interval is wide.
+That is the honest answer: with three training runs per side, the spread between runs can only be estimated roughly.
+`physim-gate plan --from` a clustered pilot says how many runs a decision needs.
+Choosing a t interval rather than a bootstrap or a random-effects model was a measured decision.
+`scripts/cluster_method_study.py` (it needs NumPy and SciPy) simulated 4,000 repetitions per row, modeled on 500-episode LIBERO evaluations (42% success, initial states shared by every run), and compared four intervals with 1, 3, 5 and 10 runs per side.
+At the margin, a wrong `PASS` and a wrong `FAIL` should each happen in at most about 2.5% of repetitions:
+
+| Spread between runs (sd of a run's success rate) | Pooled trials: wrong verdict per side | t over run means: wrong verdict per side | t over run means: FAIL at margin + 4 points, 3 / 5 / 10 runs |
+|---|---|---|---|
+| none | 2.3% to 2.8% | 2.2% to 3.0% | 38% / 81% / 100% |
+| 1.4 points | 5.8% to 7.1% | 1.9% to 2.6% | 26% / 60% / 96% |
+| 4.2 points | 22% to 25% | 2.1% to 2.6% | 10% / 20% / 43% |
+
+A random-effects meta-analysis over runs (Hartung-Knapp) gave the same results as the t interval, and its modified form (variance factor at least 1) lost most of its power at 3 runs, so the simpler t interval is used.
+Pooled trials stay accurate only when runs do not differ at all, which a handful of runs cannot establish.
 
 ### Classification
 
@@ -232,12 +274,23 @@ Away from the margin, the wrong verdict should be near 0 and the correct one sho
 | Collision 0.01 to 0.06, margin 0.02, unpaired (correct: FAIL) | 30 / 80 / 300 | 0% / 0% / 0.1% | 0.5% / 11.4% / 54.4% | rest |
 | Collision 0.01 to 0.06, margin 0.02, paired (correct: FAIL) | 30 / 80 / 300 | 0% / 0% / 0% | 0.2% / 7.6% / 63.9% | rest |
 
+Several training runs per side, at the margin (`--match runs`; the second column is runs per side, 50 or 100 trials each):
+
+| Scenario | Runs per side | PASS | FAIL | INCONCLUSIVE |
+|---|---|---|---|---|
+| Normal, run-to-run sd 0.5, trials pooled | 3 / 5 / 10 | 24.4% / 23.8% / 25.2% | 27.5% / 29.4% / 26.7% | rest |
+| Normal, run-to-run sd 0.5, `cluster_by` | 3 / 5 / 10 | 1.1% / 2.8% / 1.9% | 1.8% / 1.9% / 3.0% | rest |
+| Normal, no run-to-run spread, `cluster_by` | 3 / 5 / 10 | 1.5% / 2.4% / 2.5% | 1.9% / 2.3% / 2.1% | rest |
+| Success 0.42, run-to-run sd 3 points, margin 0.02, trials pooled | 3 / 5 / 10 | 4.8% / 5.1% / 4.1% | 4.8% / 4.6% / 4.2% | rest |
+| Success 0.42, run-to-run sd 3 points, margin 0.02, `cluster_by` | 3 / 5 / 10 | 2.4% / 1.8% / 1.7% | 1.7% / 2.9% / 2.6% | rest |
+
 What this shows:
 
 - The expanded bootstrap stays close to nominal from 10 trials on: at most 3.4% per side. With plain percentiles the same rows reached 5.5% (v0.2 and earlier; `--method percentile` reproduces them).
 - Very unequal samples are covered too. Up to v0.3.1 the degrees of freedom were `n_baseline + n_candidate - 2`, and 10 candidate trials against 1,000 baseline trials were wrong at the margin in 4.3% and 4.7% of runs per side (4,000 repetitions).
 - The price is power at very small samples: with 10 trials an unchanged metric PASSes in 18% of runs instead of 25%. From about 30 trials the difference is a few points, and at 100 it is gone.
 - The score intervals for 0/1 metrics stay near or below nominal. For rare events they are conservative, which means many `INCONCLUSIVE` results unless there are hundreds of trials.
+- Pooling the trials of several training runs is wrong at the margin far more often than nominal as soon as runs differ, up to 29% per side here. Comparing run means with `cluster_by` stays at or below 3.0%.
 - The Monte Carlo uncertainty of each percentage is roughly plus or minus 1 point.
 
 ## Planning the number of trials
@@ -266,6 +319,11 @@ The assumed true degradation is the pilot's observed one unless `--true-degradat
 Metrics the pilot could not evaluate, and paired 0/1 metrics whose pilot pairs all agreed, are listed with the reason.
 A pilot with fewer than `min_samples` observations has no interval, which is when planning is needed most; it is planned with the method and confidence the gate would use (the 0/1 method for 0/1 values, the configured confidence after correction).
 
+A clustered pilot (`cluster_by`, or several files per side) is planned in clusters per side instead of trials, from the spread of its cluster means (of the per-cluster differences when matched).
+The planner treats the estimate as normal and takes the critical value from the t distribution the engine will use (`k - 1` degrees of freedom for `k` matched clusters, `2k - 2` for two sides of `k`).
+A test checks it against the engine on simulated clusters.
+For the LeBoard calibration runs on LIBERO-10 (5 clean runs against 3 runs with video 3 frames late), the observed 3.8-point drop would need 8 runs per side to be shown as a regression with 80% probability, and a true 2-point drop 26.
+
 For continuous metrics (`--stdev`), the planner uses the normal approximation
 
 ```text
@@ -291,6 +349,7 @@ Some reference points at the defaults (confidence 0.95, power 0.8, unpaired):
 - The median's bootstrap distribution is coarse for small samples. The median of 0/1 data still uses the bootstrap and inherits its zero-event weakness; use the mean for 0/1 metrics.
 - The paired score interval is validated by simulation (the table above), not against a published worked example.
 - Trials are assumed exchangeable within a run. Strong drift within a run (for example thermal effects in hardware-in-the-loop) violates this.
+- Without `cluster_by`, a comparison is about the runs given, not about the process that produced them; see [clusters](#clusters-several-training-runs-per-side). With `cluster_by`, clusters are assumed exchangeable, and their means roughly normal.
 - Repeating a comparison until it passes ("optional stopping") invalidates the stated error rates.
 - Statistical evidence does not establish practical relevance. The margin encodes that, and it is your decision.
 
@@ -307,6 +366,8 @@ defaults:
   bootstrap_resamples: 10000   # 1000..1000000
   bootstrap_seed: 0
   bootstrap_method: expanded_percentile   # expanded_percentile | percentile
+  cluster_by: null             # a trial label, e.g. training_seed; physim.run for several files
+  min_clusters: 3              # >= 2
 policy:
   on_inconclusive: fail        # fail | pass
   on_invalid: fail             # fail | pass
@@ -319,6 +380,7 @@ metrics:
     direction: higher_is_better | lower_is_better   # optional cross-check
     required: true
     statistic / confidence / min_samples / pairing / max_missing_fraction   # per-metric overrides
+    cluster_by / min_clusters                                               # per-metric overrides
 ```
 
 `physim-gate schema config` prints the JSON Schema of this file.
